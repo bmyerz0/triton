@@ -56,27 +56,26 @@ class MemoryMap:
         mask: torch.Tensor = None,
         other=0.0,
     ):
-        assert pointer.is_cuda
         assert 0 < pointer.dim() < 3
         assert pointer.dtype == torch.int64
 
         if mask is None:
             mask = torch.ones_like(pointer).bool()
-        assert mask.is_cuda
+        
         assert 0 < mask.dim() < 3
         assert mask.dtype == torch.bool
         mask = mask.expand(pointer.size())
 
         if torch.all(~mask):
             # Todo: The type is wrong here, we can't determine the correct type
-            return torch.full_like(pointer, fill_value=other, dtype=torch.float16, device="cuda")
+            return torch.full_like(pointer, fill_value=other, dtype=torch.float16)
 
         registered_storage = self._get_registered_storage(pointer[mask])
         access_tensor = registered_storage.access_tensor
 
         index_tensor = pointer - registered_storage.ptr
 
-        block = torch.full_like(pointer, fill_value=other, dtype=access_tensor.dtype, device="cuda")
+        block = torch.full_like(pointer, fill_value=other, dtype=access_tensor.dtype)
         block[mask] = access_tensor[index_tensor[mask]]
         return block
 

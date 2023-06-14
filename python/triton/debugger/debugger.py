@@ -88,7 +88,7 @@ class DebuggerFunction:
             name, arg = v
             if torch.is_tensor(arg):
                 ptr = memory.add_tensor(arg)
-                return WrappedTensor(torch.tensor([ptr], dtype=torch.int64, device="cuda"))
+                return WrappedTensor(torch.tensor([ptr], dtype=torch.int64))
             if self._is_constexpr(name):
                 return debugger_constexpr(arg)
             return WrappedTensor(_primitive_to_tensor(arg))

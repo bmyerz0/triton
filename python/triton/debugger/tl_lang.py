@@ -10,7 +10,7 @@ def _primitive_to_tensor(x):
     """
     Converts various Python primitive data types to PyTorch tensor.
     """
-    tensor_args = {"device": "cuda"}
+    tensor_args = {}
     if isinstance(x, bool):
         return torch.tensor([x], dtype=torch.bool, **tensor_args)
     elif isinstance(x, int):
@@ -368,16 +368,16 @@ class TritonLangProxy:
     @_tensor_operation
     def program_id(self, axis):
         assert axis < len(self._context.program_id)
-        return torch.tensor([self._context.program_id[axis]], dtype=torch.int32, device="cuda")
+        return torch.tensor([self._context.program_id[axis]], dtype=torch.int32)
 
     @_tensor_operation
     def num_programs(self, axis):
         assert axis < len(self._context.program_size)
-        return torch.tensor([self._context.program_size[axis]], dtype=torch.int32, device="cuda")
+        return torch.tensor([self._context.program_size[axis]], dtype=torch.int32)
 
     @_tensor_operation
     def arange(self, start, end):
-        return torch.arange(start=start, end=end, dtype=torch.int32, device="cuda")
+        return torch.arange(start=start, end=end, dtype=torch.int32)
 
     @_tensor_operation
     def zeros(self, shape, dtype):
@@ -402,7 +402,7 @@ class TritonLangProxy:
                 dtype = torch.int8
             else:
                 raise TypeError(f"Unsupported dtype {dtype}")
-        return torch.zeros(size=shape, dtype=dtype, device="cuda")
+        return torch.zeros(size=shape, dtype=dtype)
 
     @_tensor_operation
     def dequantize(self, input, scale, shift, nbit, dst_ty=torch.float16):
@@ -437,9 +437,9 @@ class TritonLangProxy:
     def atomic_cas(self, pointer, cmp, val):
         stored = self._memory_map.load(pointer, None, 0.0)
         if not isinstance(cmp, torch.Tensor):
-            cmp = torch.tensor([cmp], dtype=stored.dtype, device="cuda")
+            cmp = torch.tensor([cmp], dtype=stored.dtype)
         if not isinstance(val, torch.Tensor):
-            val = torch.tensor([val], dtype=stored.dtype, device="cuda")
+            val = torch.tensor([val], dtype=stored.dtype)
         if stored == cmp:
             self._memory_map.store(pointer, val, None)
         return stored
@@ -447,7 +447,7 @@ class TritonLangProxy:
     @_tensor_operation
     def atomic_xchg(self, pointer, val, mask=None):
         if isinstance(val, int):
-            val = torch.tensor([val], dtype=torch.int32, device="cuda")
+            val = torch.tensor([val], dtype=torch.int32)
         stored = self._memory_map.load(pointer, mask, 0.0)
         self._memory_map.store(pointer, val, mask)
         return stored
@@ -561,9 +561,9 @@ class TritonLangProxy:
     @_tensor_operation
     def minimum(self, x, y):
         if isinstance(x, int):
-            x = torch.tensor(x, device="cuda")
+            x = torch.tensor(x)
         if isinstance(y, int):
-            y = torch.tensor(y, device="cuda")
+            y = torch.tensor(y)
         return torch.minimum(x, y)
 
     @_tensor_operation
