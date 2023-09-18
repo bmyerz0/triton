@@ -156,25 +156,8 @@ import triton
 import triton.language as tl
 
 
-# `triton.jit`'ed functions can be auto-tuned by using the `triton.autotune` decorator, which consumes:
-#   - A list of `triton.Config` objects that define different configurations of
-#       meta-parameters (e.g., `BLOCK_SIZE_M`) and compilation options (e.g., `num_warps`) to try
-#   - An auto-tuning *key* whose change in values will trigger evaluation of all the
-#       provided configs
-@triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=3, num_warps=8),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5, num_warps=2),
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5, num_warps=2),
-    ],
-    key=['M', 'N', 'K'],
-)
-@triton.jit
+
+@triton.jit(interpret=True)
 def matmul_kernel(
     # Pointers to matrices
     a_ptr, b_ptr, c_ptr,
@@ -230,8 +213,11 @@ def matmul_kernel(
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         # Load the next block of A and B, generate a mask by checking the K dimension.
         # If it is out of bounds, set it to 0.
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        # Not yet implemented in interpreter
+        #a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
+        #b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        a = tl.load(a_ptrs)
+        b = tl.load(b_ptrs)
         # We accumulate along the K dimension.
         accumulator += tl.dot(a, b)
         # Advance the ptrs to the next K block.
@@ -241,7 +227,9 @@ def matmul_kernel(
     # while the accumulator is still in FP32!
     if ACTIVATION == "leaky_relu":
         accumulator = leaky_relu(accumulator)
-    c = accumulator.to(tl.float16)
+    # Not yet implemented in interpreter
+    #c = accumulator.to(tl.float16)
+    c = accumulator
 
     # -----------------------------------------------------------
     # Write back the block of the output matrix C with masks.
@@ -283,7 +271,11 @@ def matmul(a, b, activation=""):
         a.stride(0), a.stride(1),
         b.stride(0), b.stride(1),
         c.stride(0), c.stride(1),
-        ACTIVATION=activation
+        ACTIVATION=activation,
+        BLOCK_SIZE_M=128,
+        BLOCK_SIZE_N=256,
+        BLOCK_SIZE_K=64,
+        GROUP_SIZE_M=8
     )
     return c
 
@@ -295,8 +287,11 @@ def matmul(a, b, activation=""):
 # We can test our custom matrix multiplication operation against a native torch implementation (i.e., cuBLAS).
 
 torch.manual_seed(0)
-a = torch.randn((512, 512), device='cuda', dtype=torch.float16)
-b = torch.randn((512, 512), device='cuda', dtype=torch.float16)
+# Not yet implemented for interpreter
+#a = torch.randn((512, 512), dtype=torch.float16)
+#b = torch.randn((512, 512), dtype=torch.float16)
+a = torch.randn((512, 512), dtype=torch.float32)
+b = torch.randn((512, 512), dtype=torch.float32)
 triton_output = matmul(a, b)
 torch_output = torch.matmul(a, b)
 print(f"triton_output={triton_output}")
@@ -305,46 +300,3 @@ if torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0):
     print("✅ Triton and Torch match")
 else:
     print("❌ Triton and Torch differ")
-
-# %%
-# Benchmark
-# ---------
-#
-# Square Matrix Performance
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~
-#
-# We can now compare the performance of our kernel against that of cuBLAS. Here we focus on square matrices,
-# but feel free to arrange this script as you wish to benchmark any other matrix shape.
-
-
-@triton.testing.perf_report(
-    triton.testing.Benchmark(
-        x_names=['M', 'N', 'K'],  # Argument names to use as an x-axis for the plot
-        x_vals=[
-            128 * i for i in range(2, 33)
-        ],  # Different possible values for `x_name`
-        line_arg='provider',  # Argument name whose value corresponds to a different line in the plot
-        # Possible values for `line_arg`
-        line_vals=['cublas', 'triton'],
-        # Label name for the lines
-        line_names=["cuBLAS", "Triton"],
-        # Line styles
-        styles=[('green', '-'), ('blue', '-')],
-        ylabel="TFLOPS",  # Label name for the y-axis
-        plot_name="matmul-performance",  # Name for the plot, used also as a file name for saving the plot.
-        args={},
-    )
-)
-def benchmark(M, N, K, provider):
-    a = torch.randn((M, K), device='cuda', dtype=torch.float16)
-    b = torch.randn((K, N), device='cuda', dtype=torch.float16)
-    quantiles = [0.5, 0.2, 0.8]
-    if provider == 'cublas':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.matmul(a, b), quantiles=quantiles)
-    if provider == 'triton':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: matmul(a, b), quantiles=quantiles)
-    perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
-    return perf(ms), perf(max_ms), perf(min_ms)
-
-
-benchmark.run(show_plots=True, print_data=True)

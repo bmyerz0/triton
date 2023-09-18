@@ -6,14 +6,13 @@ This is a Triton implementation of the Flash Attention algorithm
 (see: Dao et al., https://arxiv.org/pdf/2205.14135v2.pdf; Rabe and Staats https://arxiv.org/pdf/2112.05682v2.pdf)
 """
 
-import pytest
 import torch
 
 import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(interpret=True)
 def _fwd_kernel(
     Q, K, V, sm_scale,
     L, M,
@@ -65,7 +64,6 @@ def _fwd_kernel(
         p *= l_rcp[:, None]
         acc *= (l_prev * l_rcp)[:, None]
         # update acc
-        p = p.to(Q.dtype.element_ty)
         v = tl.load(v_ptrs)
         acc += tl.dot(p, v)
         # update m_i and l_i
@@ -89,7 +87,7 @@ def _fwd_kernel(
     tl.store(out_ptrs, acc)
 
 
-@triton.jit
+@triton.jit(interpret=True)
 def _bwd_preprocess(
     Out, DO, L,
     NewDO, Delta,
@@ -98,9 +96,9 @@ def _bwd_preprocess(
     off_m = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
     off_n = tl.arange(0, D_HEAD)
     # load
-    o = tl.load(Out + off_m[:, None] * D_HEAD + off_n[None, :]).to(tl.float32)
-    do = tl.load(DO + off_m[:, None] * D_HEAD + off_n[None, :]).to(tl.float32)
-    denom = tl.load(L + off_m).to(tl.float32)
+    o = tl.load(Out + off_m[:, None] * D_HEAD + off_n[None, :])
+    do = tl.load(DO + off_m[:, None] * D_HEAD + off_n[None, :])
+    denom = tl.load(L + off_m)
     # compute
     do = do / denom[:, None]
     delta = tl.sum(o * do, axis=1)
@@ -109,7 +107,7 @@ def _bwd_preprocess(
     tl.store(Delta + off_m, delta)
 
 
-@triton.jit
+@triton.jit(interpret=True)
 def _bwd_kernel(
     Q, K, V, sm_scale, Out, DO,
     DQ, DK, DV,
@@ -135,10 +133,10 @@ def _bwd_kernel(
     DK += off_z * stride_qz + off_h * stride_qh
     DV += off_z * stride_qz + off_h * stride_qh
     for start_n in range(0, num_block):
-        lo = start_n * BLOCK_M
+        lo = BLOCK_M * start_n 
         # initialize row/col offsets
         offs_qm = lo + tl.arange(0, BLOCK_M)
-        offs_n = start_n * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_n = BLOCK_M * start_n + tl.arange(0, BLOCK_M)
         offs_m = tl.arange(0, BLOCK_N)
         offs_k = tl.arange(0, BLOCK_DMODEL)
         # initialize pointers to value-like data
@@ -169,7 +167,7 @@ def _bwd_kernel(
             p = tl.exp(qk * sm_scale - m[:, None])
             # compute dv
             do = tl.load(do_ptrs)
-            dv += tl.dot(tl.trans(p.to(Q.dtype.element_ty)), do)
+            dv += tl.dot(tl.trans(p), do)
             # compute dp = dot(v, do)
             Di = tl.load(D_ptrs + offs_m_curr)
             dp = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32) - Di[:, None]
@@ -177,10 +175,10 @@ def _bwd_kernel(
             # compute ds = p * (dp - delta[:, None])
             ds = p * dp * sm_scale
             # compute dk = dot(ds.T, q)
-            dk += tl.dot(tl.trans(ds.to(Q.dtype.element_ty)), q)
+            dk += tl.dot(tl.trans(ds), q)
             # compute dq
             dq = tl.load(dq_ptrs)
-            dq += tl.dot(ds.to(Q.dtype.element_ty), k)
+            dq += tl.dot(ds, k)
             tl.store(dq_ptrs, dq)
             # increment pointers
             dq_ptrs += BLOCK_M * stride_qm
@@ -191,9 +189,6 @@ def _bwd_kernel(
         dk_ptrs = DK + (offs_n[:, None] * stride_kn + offs_k[None, :] * stride_kk)
         tl.store(dv_ptrs, dv)
         tl.store(dk_ptrs, dk)
-
-
-empty = torch.empty(128, device="cuda")
 
 
 class _attention(torch.autograd.Function):
@@ -269,21 +264,20 @@ class _attention(torch.autograd.Function):
 attention = _attention.apply
 
 
-@pytest.mark.parametrize('Z, H, N_CTX, D_HEAD', [(4, 48, 1024, 64)])
 def test_op(Z, H, N_CTX, D_HEAD, dtype=torch.float16):
     torch.manual_seed(20)
-    q = torch.empty((Z, H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.1, std=0.2).requires_grad_()
-    k = torch.empty((Z, H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.4, std=0.2).requires_grad_()
-    v = torch.empty((Z, H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0.3, std=0.2).requires_grad_()
+    q = torch.empty((Z, H, N_CTX, D_HEAD), dtype=dtype).normal_(mean=0.1, std=0.2).requires_grad_()
+    k = torch.empty((Z, H, N_CTX, D_HEAD), dtype=dtype).normal_(mean=0.4, std=0.2).requires_grad_()
+    v = torch.empty((Z, H, N_CTX, D_HEAD), dtype=dtype).normal_(mean=0.3, std=0.2).requires_grad_()
     sm_scale = 0.2
     dout = torch.randn_like(q)
     # reference implementation
-    M = torch.tril(torch.ones((N_CTX, N_CTX), device="cuda"))
+    M = torch.tril(torch.ones((N_CTX, N_CTX)))
     p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
     for z in range(Z):
         for h in range(H):
             p[:, :, M == 0] = float("-inf")
-    p = torch.softmax(p.float(), dim=-1).half()
+    p = torch.softmax(p.float(), dim=-1)
     # p = torch.exp(p)
     ref_out = torch.matmul(p, v)
     ref_out.backward(dout)
@@ -305,57 +299,6 @@ def test_op(Z, H, N_CTX, D_HEAD, dtype=torch.float16):
     assert torch.allclose(ref_dq, tri_dq, atol=1e-2, rtol=0)
 
 
-try:
-    from flash_attn.flash_attn_interface import flash_attn_func
-    HAS_FLASH = True
-except BaseException:
-    HAS_FLASH = False
-
-BATCH, N_HEADS, N_CTX, D_HEAD = 4, 48, 4096, 64
-# vary seq length for fixed head and batch=4
-configs = [triton.testing.Benchmark(
-    x_names=['N_CTX'],
-    x_vals=[2**i for i in range(10, 14)],
-    line_arg='provider',
-    line_vals=['triton'] + (['flash'] if HAS_FLASH else []),
-    line_names=['Triton'] + (['Flash'] if HAS_FLASH else []),
-    styles=[('red', '-'), ('blue', '-')],
-    ylabel='ms',
-    plot_name=f'fused-attention-batch{BATCH}-head{N_HEADS}-d{D_HEAD}-{mode}',
-    args={'H': N_HEADS, 'BATCH': BATCH, 'D_HEAD': D_HEAD, 'dtype': torch.float16, 'mode': mode}
-) for mode in ['fwd', 'bwd']]
+test_op(Z=4, H=48, N_CTX=1024, D_HEAD=64, dtype=torch.float32)
 
 
-@triton.testing.perf_report(configs)
-def bench_flash_attention(BATCH, H, N_CTX, D_HEAD, mode, provider, dtype=torch.float16, device="cuda"):
-    assert mode in ['fwd', 'bwd']
-    warmup = 25
-    rep = 100
-    if provider == "triton":
-        q = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
-        k = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
-        v = torch.randn((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda", requires_grad=True)
-        sm_scale = 1.3
-        fn = lambda: attention(q, k, v, sm_scale)
-        if mode == 'bwd':
-            o = fn()
-            do = torch.randn_like(o)
-            fn = lambda: o.backward(do, retain_graph=True)
-        ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
-        return ms
-    if provider == "flash":
-        lengths = torch.full((BATCH,), fill_value=N_CTX, device=device)
-        cu_seqlens = torch.zeros((BATCH + 1,), device=device, dtype=torch.int32)
-        cu_seqlens[1:] = lengths.cumsum(0)
-        qkv = torch.randn((BATCH * N_CTX, 3, H, D_HEAD), dtype=dtype, device=device, requires_grad=True)
-        fn = lambda: flash_attn_func(qkv, cu_seqlens, 0., N_CTX, causal=True)
-        if mode == 'bwd':
-            o = fn()
-            do = torch.randn_like(o)
-            fn = lambda: o.backward(do, retain_graph=True)
-        ms = triton.testing.do_bench(fn, warmup=warmup, rep=rep)
-        return ms
-
-
-# only works on post-Ampere GPUs right now
-bench_flash_attention.run(save_path='.', print_data=True)
